@@ -1,52 +1,72 @@
-# 📋 案件見える化ダッシュボード
+🧾 Workflow Dashboard（案件管理ツール）
+■ Overview
 
-## 🧭 概要
-案件の進捗・期限・売上を一元管理できるダッシュボードツールです。  
-未対応や期限切れを可視化し、対応漏れを防ぐことを目的としています。
+案件の登録・管理・売上確認ができるWebアプリです。
+Supabaseを利用した認証機能とデータベース連携により、ユーザーごとのデータ管理を実現しています。
 
----
+■ Demo
 
-## 🌐 デモURL
-https://workflow-dashboard-xtnygqratjpfyhtv6nrzu8.streamlit.app/
+👉 https://workflow-dashboard-xtnygqratjpfyhtv6nrzu8.streamlit.app/
 
----
+※ログイン機能を使用するため、初回はユーザー登録が必要です
 
-## 🚀 使い方
+■ Features
+🔐 ユーザー認証（Supabase Auth）
+📋 案件の登録 / 編集 / 削除
+📊 案件一覧表示
+💰 売上の自動計算
+👤 ユーザーごとのデータ分離
+■ Tech Stack
+Python（Streamlit）
+Supabase（Auth / Database）
+Pandas
+■ Architecture
+フロント：Streamlit
+認証：Supabase Auth
+DB：Supabase（PostgreSQL）
+ユーザー識別：auth.uid() による分離
+■ Database Schema
 
-### ① データ準備
-data.example.csv をコピーして data.csv を作成してください。
+Table: cases
 
-#### Windows
-```bash
-copy data.example.csv data.csv
-Mac / Linux
-cp data.example.csv data.csv
-② ライブラリインストール
+user_id
+case_id
+order_date
+due_date
+customer_name
+case_name
+count
+unit_price
+revenue
+status
+memo
+■ Setup
+1. Clone
+git clone （URL）
+cd workflow-dashboard
+2. Install
 pip install -r requirements.txt
-③ アプリ起動
+3. Secrets設定
+
+.streamlit/secrets.toml
+
+SUPABASE_URL = "https://xxxx.supabase.co"
+SUPABASE_KEY = "your-anon-key"
+4. Run
 streamlit run app.py
+■ Deployment（重要）
 
-ブラウザで以下を開きます。
-http://localhost:8501
+Streamlit Cloudで動かす場合は
+Settings → Secrets に以下を設定
 
-💡 主な機能
-案件の登録・編集・削除
-状態管理（未対応・対応中・完了）
-期限アラート（期限切れ・直近）
-売上の自動計算
-フィルター・一覧表示
-🎯 工夫したポイント
-期限切れ・直近の案件を自動で検知しアラート表示
-状態ごとに色分けして視覚的に分かりやすく設計
-編集・削除機能を実装し、実務で使える構成にした
-初心者でも扱いやすいシンプルなUI
-⚠️ 注意事項
-data.csv はローカルデータとして管理されます（Gitには含まれません）
-個人情報・機密情報は自己責任で管理してください
-🔧 使用技術
-Python
-Streamlit
-pandas
-👤 Author
+SUPABASE_URL
+SUPABASE_KEY
+■ Improvements
+UI/UX改善
+スマホ対応
+LINE通知機能
+カレンダー連携
+■ Why I built this
 
-chiyo-labs
+案件管理をシンプルに行えるツールを作りたいと考え、開発しました。
+また、自分用だけでなく「他の人にも使えるツール」を意識して設計しています。

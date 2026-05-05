@@ -10,9 +10,9 @@ except Exception:
     Client = object  # type: ignore[assignment]
     create_client = None  # type: ignore[assignment]
 
-CSV_PATH = "data.csv"
 COLUMNS = ["ID", "受注日", "期限", "顧客名", "案件名", "件数", "単価", "売上", "状態", "メモ"]
 STATUS_OPTIONS = ["未対応", "対応中", "保留", "確認待ち", "完了"]
+SUPABASE_TABLE = "cases"
 
 STATUS_BG = {
     "未対応":   "#FFE4E4",
@@ -276,6 +276,11 @@ def _render_auth_gate() -> bool:
 
     st.title("🔐 ログイン")
     st.caption("このアプリはログイン済みユーザーのみ利用できます。")
+    st.info(
+        "はじめての方へ\n\n"
+        "このツールは、案件の進捗・期限・売上を管理するためのツールです。\n"
+        "まずは新規登録またはログイン後、案件登録から入力してください。"
+    )
     if err:
         st.error(err)
         return False
@@ -300,7 +305,7 @@ def _render_auth_gate() -> bool:
                                 {"email": email.strip(), "password": password}
                             )
                             if res.user is None:
-                                st.error("ログインに失敗しました。認証情報を確認してください。")
+                                st.error("ログインできませんでした。メールアドレスやパスワードをもう一度ご確認ください。")
                             else:
                                 st.session_state.auth_user = {
                                     "id": res.user.id,
@@ -309,7 +314,15 @@ def _render_auth_gate() -> bool:
                                 st.success("ログインしました。")
                                 st.rerun()
                         except Exception as e:
-                            st.error(f"ログインエラー: {e}")
+                            msg = str(e).lower()
+                            if "invalid login credentials" in msg:
+                                st.error("ログインできませんでした。メールアドレスやパスワードをもう一度ご確認ください。")
+                            elif "email not confirmed" in msg:
+                                st.error("メール確認が未完了です。受信箱の確認メールから認証を完了してください。")
+                            elif "network" in msg or "timeout" in msg:
+                                st.error("通信エラーが発生しました。時間をおいて再度お試しください。")
+                            else:
+                                st.error("ログイン時にエラーが発生しました。時間をおいて再度お試しください。")
 
         with tab_signup:
             with st.form("signup_form"):
@@ -335,13 +348,108 @@ def _render_auth_gate() -> bool:
                                 "新規登録を受け付けました。メール確認が必要な場合は受信箱を確認してください。"
                             )
                         except Exception as e:
-                            st.error(f"新規登録エラー: {e}")
+                            msg = str(e).lower()
+                            if "already registered" in msg or "already been registered" in msg:
+                                st.error("このメールアドレスは既に登録されています。ログインをお試しください。")
+                            elif "password" in msg and "6" in msg:
+                                st.error("パスワードは6文字以上で設定してください。")
+                            elif "network" in msg or "timeout" in msg:
+                                st.error("通信エラーが発生しました。時間をおいて再度お試しください。")
+                            else:
+                                st.error("新規登録時にエラーが発生しました。入力内容を確認して再度お試しください。")
 
     return False
 
 
 def _nk(name: str) -> str:
     return unicodedata.normalize("NFKC", str(name).strip())
+
+
+def _current_user_id() -> Optional[str]:
+    return st.session_state.get("auth_user", {}).get("id")
+
+
+def _debug_log(msg: str) -> None:
+    logs = st.session_state.setdefault("debug_logs", [])
+    logs.append(msg)
+    # 肥大化を防ぐ
+    if len(logs) > 200:
+        st.session_state.debug_logs = logs[-200:]
+
+
+def _render_debug_logs() -> None:
+    logs = st.session_state.get("debug_logs", [])
+    with st.sidebar.expander("🛠 保存デバッグログ", expanded=False):
+        if not logs:
+            st.caption("まだログはありません。")
+        else:
+            st.code("\n".join(logs[-80:]))
+        if st.button("ログをクリア", key="btn_clear_debug_logs", use_container_width=True):
+            st.session_state.debug_logs = []
+            st.rerun()
+
+
+def _ui_id_to_uuid(ui_id: str) -> str:
+    """画面表示用の WF-xxx から Supabase の UUID を引く。"""
+    m = st.session_state.get("case_uuid_map", {}) or {}
+    return str(m.get(ui_id, ui_id)).strip()
+
+
+def _to_db_record(row: dict, user_id: str) -> dict:
+    """画面用レコードを Supabase 保存形式へ変換する。"""
+    juchuubi = pd.to_datetime(row.get("受注日"), errors="coerce")
+    kigen = pd.to_datetime(row.get("期限"), errors="coerce")
+    return {
+        "user_id": user_id,
+        "order_date": juchuubi.date().isoformat() if pd.notna(juchuubi) else None,
+        "deadline": kigen.date().isoformat() if pd.notna(kigen) else None,
+        "customer_name": str(row.get("顧客名", "")).strip(),
+        "case_name": str(row.get("案件名", "")).strip(),
+        "quantity": int(pd.to_numeric(row.get("件数"), errors="coerce") or 0),
+        "unit_price": int(pd.to_numeric(row.get("単価"), errors="coerce") or 0),
+        "revenue": int(pd.to_numeric(row.get("売上"), errors="coerce") or 0),
+        "status": str(row.get("状態", "")).strip(),
+        "memo": str(row.get("メモ", "")).strip(),
+    }
+
+
+def _from_db_records(records: list[dict]) -> Tuple[pd.DataFrame, dict[str, str]]:
+    rows = []
+    id_map: dict[str, str] = {}
+    for r in records:
+        supa_uuid = str(r.get("id") or "").strip()
+        if not supa_uuid:
+            continue
+        ui_id = f"WF-{len(id_map) + 1:03d}"
+        id_map[ui_id] = supa_uuid
+        rows.append(
+            {
+                "ID": ui_id,
+                "受注日": pd.to_datetime(r.get("order_date"), errors="coerce"),
+                "期限": pd.to_datetime(r.get("deadline"), errors="coerce"),
+                "顧客名": r.get("customer_name", ""),
+                "案件名": r.get("case_name", ""),
+                "件数": int(pd.to_numeric(r.get("quantity"), errors="coerce") or 0),
+                "単価": int(pd.to_numeric(r.get("unit_price"), errors="coerce") or 0),
+                "売上": int(pd.to_numeric(r.get("revenue"), errors="coerce") or 0),
+                "状態": r.get("status", ""),
+                "メモ": r.get("memo", ""),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=COLUMNS), {}
+    df = pd.DataFrame(rows)
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    df["受注日"] = pd.to_datetime(df["受注日"], errors="coerce")
+    df["期限"] = pd.to_datetime(df["期限"], errors="coerce")
+    df["件数"] = pd.to_numeric(df["件数"], errors="coerce").fillna(0).astype(int)
+    df["単価"] = pd.to_numeric(df["単価"], errors="coerce").fillna(0).astype(int)
+    df["売上"] = pd.to_numeric(df["売上"], errors="coerce").fillna(0).astype(int)
+    df["メモ"] = df["メモ"].fillna("").astype(str).replace("nan", "")
+    return df[COLUMNS], id_map
 
 
 # ── ID 管理 ────────────────────────────────────────────────────
@@ -360,43 +468,131 @@ def _next_id(df: pd.DataFrame) -> str:
 
 
 # ── データ読み書き ──────────────────────────────────────────────
-def load_data() -> pd.DataFrame:
-    if not os.path.exists(CSV_PATH):
+def load_data(user_id: str) -> pd.DataFrame:
+    client, err = _try_get_supabase_client()
+    if err or client is None:
+        st.error(err or "Supabase クライアントの初期化に失敗しました。")
+        return pd.DataFrame(columns=COLUMNS)
+    try:
+        res = (
+            client.table(SUPABASE_TABLE)
+            .select(
+                "id,order_date,deadline,customer_name,case_name,quantity,unit_price,revenue,status,memo,created_at"
+            )
+            .eq("user_id", user_id)
+            .order("created_at")
+            .execute()
+        )
+        records = res.data if res and res.data else []
+        df, id_map = _from_db_records(records)
+        st.session_state.case_uuid_map = id_map
+        return df
+    except Exception as e:
+        st.error(f"データ読み込みに失敗しました: {e}")
         return pd.DataFrame(columns=COLUMNS)
 
-    df = pd.read_csv(CSV_PATH)
-    df.columns = [str(c).strip() for c in df.columns]
 
-    if "日付" in df.columns and "受注日" not in df.columns:
-        df = df.rename(columns={"日付": "受注日"})
-
-    bad = next((c for c in df.columns if _nk(c) == "事件名"), None)
-    if bad and "案件名" not in df.columns:
-        df = df.rename(columns={bad: "案件名"})
-
-    if "ID" not in df.columns:
-        df.insert(0, "ID", [f"WF-{i:03d}" for i in range(1, len(df) + 1)])
-
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    df["受注日"] = pd.to_datetime(df["受注日"], errors="coerce")
-    df["期限"]   = pd.to_datetime(df["期限"],   errors="coerce")
-    df["件数"]   = pd.to_numeric(df["件数"],   errors="coerce").fillna(0).astype(int)
-    df["単価"]   = pd.to_numeric(df["単価"],   errors="coerce").fillna(0).astype(int)
-    df["売上"]   = pd.to_numeric(df["売上"],   errors="coerce").fillna(0).astype(int)
-    df["メモ"]   = df["メモ"].fillna("").astype(str).replace("nan", "")
-
-    return df[COLUMNS]
+def _insert_case(row: dict, user_id: str) -> bool:
+    _debug_log(f"[insert] called id={row.get('ID')!r} user_id={user_id!r}")
+    client, err = _try_get_supabase_client()
+    if err or client is None:
+        _debug_log(f"[insert] supabase client error: {err!r}")
+        st.error(err or "Supabase クライアントの初期化に失敗しました。")
+        return False
+    try:
+        payload = _to_db_record(row, user_id)
+        _debug_log(f"[insert] payload={payload!r}")
+        ins_res = client.table(SUPABASE_TABLE).insert(payload).execute()
+        _debug_log(
+            f"[insert] success returned_rows={len(ins_res.data) if getattr(ins_res, 'data', None) else 0}"
+        )
+        return True
+    except Exception as e:
+        _debug_log(f"[insert] exception type={type(e).__name__} detail={e!r}")
+        st.error(f"データ登録に失敗しました。詳細: {type(e).__name__}: {e}")
+        return False
 
 
-def save_data(df: pd.DataFrame) -> None:
-    out = df.copy()
-    out["受注日"] = pd.to_datetime(out["受注日"]).dt.strftime("%Y-%m-%d")
-    kigen = pd.to_datetime(out["期限"])
-    out["期限"] = kigen.dt.strftime("%Y-%m-%d").where(kigen.notna(), "")
-    out.to_csv(CSV_PATH, index=False)
+def _update_case(case_id: str, updates: dict, user_id: str) -> bool:
+    _debug_log(f"[update] called uuid={case_id!r} user_id={user_id!r}")
+    client, err = _try_get_supabase_client()
+    if err or client is None:
+        _debug_log(f"[update] supabase client error: {err!r}")
+        st.error(err or "Supabase クライアントの初期化に失敗しました。")
+        return False
+    try:
+        # 部分更新（例: 期限だけ削除）でも他フィールドを消さないよう、
+        # まず既存レコードを取得してマージしてから update する。
+        existing_res = (
+            client.table(SUPABASE_TABLE)
+            .select(
+                "order_date,deadline,customer_name,case_name,quantity,unit_price,revenue,status,memo"
+            )
+            .eq("user_id", user_id)
+            .eq("id", case_id)
+            .execute()
+        )
+        existing = (existing_res.data or [None])[0]
+        if not existing:
+            raise RuntimeError("更新対象のレコードが見つかりません。")
+
+        merged_row = {
+            "受注日": existing.get("order_date"),
+            "期限": existing.get("deadline"),
+            "顧客名": existing.get("customer_name", ""),
+            "案件名": existing.get("case_name", ""),
+            "件数": existing.get("quantity", 0),
+            "単価": existing.get("unit_price", 0),
+            "売上": existing.get("revenue", 0),
+            "状態": existing.get("status", ""),
+            "メモ": existing.get("memo", ""),
+        }
+        # updates（例: {"期限": pd.NaT}）で上書き
+        merged_row.update(updates)
+
+        payload = _to_db_record(merged_row, user_id)
+        payload.pop("user_id", None)
+        _debug_log(f"[update] payload={payload!r}")
+        upd_res = (
+            client.table(SUPABASE_TABLE)
+            .update(payload)
+            .eq("user_id", user_id)
+            .eq("id", case_id)
+            .execute()
+        )
+        _debug_log(
+            f"[update] success returned_rows={len(upd_res.data) if getattr(upd_res, 'data', None) else 0}"
+        )
+        return True
+    except Exception as e:
+        _debug_log(f"[update] exception type={type(e).__name__} detail={e!r}")
+        st.error(f"データ更新に失敗しました。詳細: {type(e).__name__}: {e}")
+        return False
+
+
+def _delete_case(case_id: str, user_id: str) -> bool:
+    _debug_log(f"[delete] called uuid={case_id!r} user_id={user_id!r}")
+    client, err = _try_get_supabase_client()
+    if err or client is None:
+        _debug_log(f"[delete] supabase client error: {err!r}")
+        st.error(err or "Supabase クライアントの初期化に失敗しました。")
+        return False
+    try:
+        del_res = (
+            client.table(SUPABASE_TABLE)
+            .delete()
+            .eq("user_id", user_id)
+            .eq("id", case_id)
+            .execute()
+        )
+        _debug_log(
+            f"[delete] success returned_rows={len(del_res.data) if getattr(del_res, 'data', None) else 0}"
+        )
+        return True
+    except Exception as e:
+        _debug_log(f"[delete] exception type={type(e).__name__} detail={e!r}")
+        st.error(f"データ削除に失敗しました。詳細: {type(e).__name__}: {e}")
+        return False
 
 
 def _add_sample_data() -> None:
@@ -440,8 +636,16 @@ def _add_sample_data() -> None:
             "メモ":   "毎月自動更新",
         },
     ]
-    st.session_state.df = pd.DataFrame(rows, columns=COLUMNS)
-    save_data(st.session_state.df)
+    user_id = _current_user_id()
+    if not user_id:
+        return
+    ok = True
+    for row in rows:
+        if not _insert_case(row, user_id):
+            ok = False
+            break
+    if ok:
+        st.session_state.df = load_data(user_id)
 
 
 # ── ユーティリティ ─────────────────────────────────────────────
@@ -554,6 +758,7 @@ def main():
     st.sidebar.markdown("### アカウント")
     if user_email:
         st.sidebar.caption(f"ログイン中: {user_email}")
+    _render_debug_logs()
     if st.sidebar.button("ログアウト", use_container_width=True):
         client, _ = _try_get_supabase_client()
         if client is not None:
@@ -562,12 +767,26 @@ def main():
             except Exception:
                 pass
         st.session_state.auth_user = None
+        st.session_state.loaded_user_id = None
+        st.session_state.df = pd.DataFrame(columns=COLUMNS)
+        st.session_state.debug_logs = []
         st.rerun()
 
     st.title("📋 案件管理ツール")
+    st.caption(
+        "はじめての方へ：このツールは案件の進捗・期限・売上を管理するためのツールです。"
+        " まずは「1️⃣ 案件登録」から入力してください。"
+    )
+    user_id = _current_user_id()
+    if not user_id:
+        st.error("ユーザー情報を取得できません。再ログインしてください。")
+        return
 
-    if "df" not in st.session_state:
-        st.session_state.df = load_data()
+    if "loaded_user_id" not in st.session_state:
+        st.session_state.loaded_user_id = None
+    if ("df" not in st.session_state) or (st.session_state.loaded_user_id != user_id):
+        st.session_state.df = load_data(user_id)
+        st.session_state.loaded_user_id = user_id
     if "editing_id" not in st.session_state:
         st.session_state.editing_id = None
 
@@ -597,7 +816,7 @@ def main():
 **その他のポイント：**
 - 各案件に `WF-001` 形式の一意IDが自動で付きます
 - 期限が設定された案件は、期限切れ・3日前になると画面上部にアラートが表示されます
-- データは `data.csv` に自動保存されます。「CSVダウンロード」でいつでも取り出せます
+- データは Supabase の `cases` テーブルに保存されます（ユーザーごとに分離）
         """)
 
     # ── アラート ──────────────────────────────────────────────
@@ -619,7 +838,12 @@ def main():
             else:
                 st.success("✅ 未対応・期限切れの案件はありません。")
     else:
-        st.info("案件がまだ登録されていません。下のフォームから登録するか、サンプルデータで試してみてください。")
+        st.info(
+            "案件データはまだ0件です。\n\n"
+            "はじめて使う場合は、次のどちらかで開始できます。\n"
+            "・下の「1️⃣ 案件登録」から1件登録する\n"
+            "・「📥 サンプルデータを追加する（3件）」で動作を試す"
+        )
         if st.button("📥 サンプルデータを追加する（3件）", key="btn_sample"):
             _add_sample_data()
             st.success("サンプルデータを3件追加しました！")
@@ -702,9 +926,13 @@ def main():
                 st.session_state.df = pd.concat(
                     [st.session_state.df, new_row], ignore_index=True
                 )
-                save_data(st.session_state.df)
-                st.success(f"✅ 案件を登録しました！（ID: {new_id}）")
-                st.rerun()
+                _debug_log(f"[register] insert start new_id={new_id} user_id={user_id!r}")
+                if _insert_case(new_row.iloc[0].to_dict(), user_id):
+                    st.success(f"✅ 案件を登録しました！（ID: {new_id}）")
+                    st.session_state.df = load_data(user_id)
+                    st.rerun()
+                # DB保存失敗時はローカル差分を戻す
+                st.session_state.df = st.session_state.df.iloc[:-1].reset_index(drop=True)
 
     st.markdown("---")
     df = st.session_state.df
@@ -856,10 +1084,10 @@ def main():
         ):
             if st.session_state.editing_id == sel_id:
                 st.session_state.editing_id = None
-            st.session_state.df = df.drop(sel_real_idx).reset_index(drop=True)
-            save_data(st.session_state.df)
-            st.success(f"🗑️ {sel_id} を削除しました。")
-            st.rerun()
+            if _delete_case(_ui_id_to_uuid(sel_id), user_id):
+                st.session_state.df = df.drop(sel_real_idx).reset_index(drop=True)
+                st.success(f"🗑️ {sel_id} を削除しました。")
+                st.rerun()
 
     # ── 編集フォーム ──────────────────────────────────────────
     if st.session_state.editing_id is not None:
@@ -956,12 +1184,12 @@ def main():
                         "状態":   e_status,
                         "メモ":   e_memo.strip(),
                     }
-                    for col, val in updates.items():
-                        st.session_state.df.at[edit_real_idx, col] = val
-                    save_data(st.session_state.df)
-                    st.session_state.editing_id = None
-                    st.success("✅ 変更を保存しました！")
-                    st.rerun()
+                    if _update_case(_ui_id_to_uuid(edit_id), updates, user_id):
+                        for col, val in updates.items():
+                            st.session_state.df.at[edit_real_idx, col] = val
+                        st.session_state.editing_id = None
+                        st.success("✅ 変更を保存しました！")
+                        st.rerun()
 
         col_cancel, col_clear = st.columns(2)
         with col_cancel:
@@ -972,10 +1200,10 @@ def main():
             if pd.notna(edit_row["期限"]) and st.button(
                 "📅 期限を削除する", key="btn_clear_deadline", use_container_width=True
             ):
-                st.session_state.df.at[edit_real_idx, "期限"] = pd.NaT
-                save_data(st.session_state.df)
-                st.success("期限を削除しました。")
-                st.rerun()
+                if _update_case(_ui_id_to_uuid(edit_id), {"期限": pd.NaT}, user_id):
+                    st.session_state.df.at[edit_real_idx, "期限"] = pd.NaT
+                    st.success("期限を削除しました。")
+                    st.rerun()
 
     _inject_jp_font()
 
