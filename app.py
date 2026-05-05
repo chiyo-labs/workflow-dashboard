@@ -3,6 +3,12 @@ import pandas as pd
 from datetime import date
 import os
 import unicodedata
+from typing import Optional, Tuple
+try:
+    from supabase import Client, create_client
+except Exception:
+    Client = object  # type: ignore[assignment]
+    create_client = None  # type: ignore[assignment]
 
 CSV_PATH = "data.csv"
 COLUMNS = ["ID", "受注日", "期限", "顧客名", "案件名", "件数", "単価", "売上", "状態", "メモ"]
@@ -242,6 +248,98 @@ def _inject_jp_font() -> None:
     st.markdown(_JP_UI_STYLE, unsafe_allow_html=True)
 
 
+@st.cache_resource
+def _get_supabase_client() -> Client:
+    if create_client is None:
+        raise RuntimeError("supabase パッケージが未インストールです。`pip install -r requirements.txt` を実行してください。")
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
+def _try_get_supabase_client() -> Tuple[Optional[Client], Optional[str]]:
+    try:
+        client = _get_supabase_client()
+        return client, None
+    except KeyError:
+        return None, "Supabase 設定が未完了です。`st.secrets` に `SUPABASE_URL` / `SUPABASE_KEY` を設定してください。"
+    except Exception as e:
+        return None, f"Supabase への接続に失敗しました: {e}"
+
+
+def _render_auth_gate() -> bool:
+    """未ログイン時にログイン/新規登録画面を表示し、ログイン済みなら True を返す。"""
+    if st.session_state.get("auth_user") is not None:
+        return True
+
+    client, err = _try_get_supabase_client()
+
+    st.title("🔐 ログイン")
+    st.caption("このアプリはログイン済みユーザーのみ利用できます。")
+    if err:
+        st.error(err)
+        return False
+
+    left, center, right = st.columns([1, 1.6, 1])
+    with center:
+        tab_login, tab_signup = st.tabs(["ログイン", "新規登録"])
+
+        with tab_login:
+            with st.form("login_form"):
+                email = st.text_input("メールアドレス", key="login_email")
+                password = st.text_input(
+                    "パスワード", type="password", key="login_password"
+                )
+                do_login = st.form_submit_button("ログイン", use_container_width=True)
+                if do_login:
+                    if not email.strip() or not password:
+                        st.error("メールアドレスとパスワードを入力してください。")
+                    else:
+                        try:
+                            res = client.auth.sign_in_with_password(
+                                {"email": email.strip(), "password": password}
+                            )
+                            if res.user is None:
+                                st.error("ログインに失敗しました。認証情報を確認してください。")
+                            else:
+                                st.session_state.auth_user = {
+                                    "id": res.user.id,
+                                    "email": res.user.email,
+                                }
+                                st.success("ログインしました。")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"ログインエラー: {e}")
+
+        with tab_signup:
+            with st.form("signup_form"):
+                new_email = st.text_input("メールアドレス", key="signup_email")
+                new_password = st.text_input(
+                    "パスワード（6文字以上）", type="password", key="signup_password"
+                )
+                do_signup = st.form_submit_button("新規登録", use_container_width=True)
+                if do_signup:
+                    if not new_email.strip() or not new_password:
+                        st.error("メールアドレスとパスワードを入力してください。")
+                    elif len(new_password) < 6:
+                        st.error("パスワードは6文字以上にしてください。")
+                    else:
+                        try:
+                            client.auth.sign_up(
+                                {
+                                    "email": new_email.strip(),
+                                    "password": new_password,
+                                }
+                            )
+                            st.success(
+                                "新規登録を受け付けました。メール確認が必要な場合は受信箱を確認してください。"
+                            )
+                        except Exception as e:
+                            st.error(f"新規登録エラー: {e}")
+
+    return False
+
+
 def _nk(name: str) -> str:
     return unicodedata.normalize("NFKC", str(name).strip())
 
@@ -447,6 +545,25 @@ def _status_badge(case_id: str, status: str, customer: str, case: str,
 def main():
     st.set_page_config(page_title="案件管理ツール", page_icon="📋", layout="wide")
     _inject_jp_font()
+
+    if not _render_auth_gate():
+        _inject_jp_font()
+        return
+
+    user_email = st.session_state.get("auth_user", {}).get("email", "")
+    st.sidebar.markdown("### アカウント")
+    if user_email:
+        st.sidebar.caption(f"ログイン中: {user_email}")
+    if st.sidebar.button("ログアウト", use_container_width=True):
+        client, _ = _try_get_supabase_client()
+        if client is not None:
+            try:
+                client.auth.sign_out()
+            except Exception:
+                pass
+        st.session_state.auth_user = None
+        st.rerun()
+
     st.title("📋 案件管理ツール")
 
     if "df" not in st.session_state:
