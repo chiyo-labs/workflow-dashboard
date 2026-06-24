@@ -322,7 +322,7 @@ def _render_auth_gate() -> bool:
                             elif "network" in msg or "timeout" in msg:
                                 st.error("通信エラーが発生しました。時間をおいて再度お試しください。")
                             else:
-                                st.error("ログイン時にエラーが発生しました。時間をおいて再度お試しください。")
+                                st.error(f"ログイン時にエラーが発生しました: {e}")
 
         with tab_signup:
             with st.form("signup_form"):
@@ -356,7 +356,7 @@ def _render_auth_gate() -> bool:
                             elif "network" in msg or "timeout" in msg:
                                 st.error("通信エラーが発生しました。時間をおいて再度お試しください。")
                             else:
-                                st.error("新規登録時にエラーが発生しました。入力内容を確認して再度お試しください。")
+                                st.error(f"新規登録時にエラーが発生しました: {e}")
 
     return False
 
